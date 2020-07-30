@@ -171,13 +171,20 @@ def train(args, train_dataset, model, tokenizer):
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
         for step, batch in enumerate(epoch_iterator):
 
+            torch.cuda.nvtx.range_push("step:" + str(step))
             # Skip past any already trained steps if resuming training
             if steps_trained_in_current_epoch > 0:
                 steps_trained_in_current_epoch -= 1
                 continue
 
+            torch.cuda.nvtx.range_push("Growing Tree")
             model.train()
+            torch.cuda.nvtx.range_pop()
+
+            torch.cuda.nvtx.range_push("Data Loading to Device")
             batch = tuple(t.to(args.device) for t in batch)
+            torch.cuda.nvtx.range_pop()
+
 
             inputs = {
                 "input_ids": batch[0],
@@ -199,38 +206,51 @@ def train(args, train_dataset, model, tokenizer):
                         {"langs": (torch.ones(batch[0].shape, dtype=torch.int64) * args.lang_id).to(args.device)}
                     )
 
+            torch.cuda.nvtx.range_push("Forward Pass")
             outputs = model(**inputs)
             # model outputs are always tuple in transformers (see doc)
+            torch.cuda.nvtx.range_pop()
+
+            torch.cuda.nvtx.range_push("loss calc")
             loss = outputs[0]
 
             if args.n_gpu > 1:
                 loss = loss.mean()  # mean() to average on multi-gpu parallel (not distributed) training
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
+            torch.cuda.nvtx.range_pop()
 
+            torch.cuda.nvtx.range_push("Backward Pass")
             if args.fp16:
                 with amp.scale_loss(loss, optimizer) as scaled_loss:
                     scaled_loss.backward()
             else:
                 loss.backward()
+            torch.cuda.nvtx.range_pop()
 
             tr_loss += loss.item()
             if (step + 1) % args.gradient_accumulation_steps == 0:
+                torch.cuda.nvtx.range_push("Clip grad norm")
                 if args.fp16:
                     torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
                 else:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                torch.cuda.nvtx.range_pop()
 
+                torch.cuda.nvtx.range_push("Optimizer and Scheduler step!")
                 optimizer.step()
                 scheduler.step()  # Update learning rate schedule
                 model.zero_grad()
+                torch.cuda.nvtx.range_pop()
                 global_step += 1
 
                 # Log metrics
                 if args.local_rank in [-1, 0] and args.logging_steps > 0 and global_step % args.logging_steps == 0:
                     # Only evaluate when single GPU otherwise metrics may not average well
                     if args.local_rank == -1 and args.evaluate_during_training:
+                        torch.cuda.nvtx.range_push("Evaluation")
                         results = evaluate(args, model, tokenizer)
+                        torch.cuda.nvtx.range_pop()
                         for key, value in results.items():
                             tb_writer.add_scalar("eval_{}".format(key), value, global_step)
                     tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
@@ -252,6 +272,7 @@ def train(args, train_dataset, model, tokenizer):
                     torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
                     logger.info("Saving optimizer and scheduler states to %s", output_dir)
 
+            torch.cuda.nvtx.range_pop()
             if args.max_steps > 0 and global_step > args.max_steps:
                 epoch_iterator.close()
                 break
