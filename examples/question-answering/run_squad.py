@@ -185,7 +185,6 @@ def train(args, train_dataset, model, tokenizer):
             batch = tuple(t.to(args.device) for t in batch)
             torch.cuda.nvtx.range_pop()
 
-
             inputs = {
                 "input_ids": batch[0],
                 "attention_mask": batch[1],
@@ -221,6 +220,8 @@ def train(args, train_dataset, model, tokenizer):
             torch.cuda.nvtx.range_pop()
 
             torch.cuda.nvtx.range_push("Backward Pass")
+            
+            torch.cuda.nvtx.range_push("Loss Backward")
             if args.fp16:
                 with amp.scale_loss(loss, optimizer) as scaled_loss:
                     scaled_loss.backward()
@@ -242,6 +243,7 @@ def train(args, train_dataset, model, tokenizer):
                 scheduler.step()  # Update learning rate schedule
                 model.zero_grad()
                 torch.cuda.nvtx.range_pop()
+                
                 global_step += 1
 
                 # Log metrics
@@ -272,6 +274,7 @@ def train(args, train_dataset, model, tokenizer):
                     torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
                     logger.info("Saving optimizer and scheduler states to %s", output_dir)
 
+            torch.cuda.nvtx.range_pop()
             torch.cuda.nvtx.range_pop()
             if args.max_steps > 0 and global_step > args.max_steps:
                 epoch_iterator.close()
@@ -783,6 +786,9 @@ def main():
         train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=False)
         global_step, tr_loss = train(args, train_dataset, model, tokenizer)
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
+
+    # Exit here since we are focusing on the profiling of training step
+    exit()
 
     # Save the trained model and the tokenizer
     if args.do_train and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
