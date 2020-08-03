@@ -122,9 +122,10 @@ def train(args, train_dataset, model, tokenizer):
 
     # Distributed training (should be after apex fp16 initialization)
     if args.local_rank != -1:
-        model = torch.nn.parallel.DistributedDataParallel(
-            model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=True
-        )
+        # model = torch.nn.parallel.DistributedDataParallel(
+        #     model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=True
+        # )
+        model = apex.parallel.DistributedDataParallel(model)
 
     # Train!
     logger.info("***** Running training *****")
@@ -166,10 +167,15 @@ def train(args, train_dataset, model, tokenizer):
     )
     # Added here for reproductibility
     set_seed(args)
+    Step_times = []
+    Forward_times = []
+    Backward_times = []
 
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
         for step, batch in enumerate(epoch_iterator):
+
+        	start_time = timeit.default_timer()
 
             torch.cuda.nvtx.range_push("step:" + str(step))
             # Skip past any already trained steps if resuming training
@@ -206,11 +212,15 @@ def train(args, train_dataset, model, tokenizer):
                     )
 
             torch.cuda.nvtx.range_push("Forward Pass")
+            end = timeit.default_timer()
             outputs = model(**inputs)
             # model outputs are always tuple in transformers (see doc)
+            Forward_times.append(timeit.default_timer() - end)
             torch.cuda.nvtx.range_pop()
 
             torch.cuda.nvtx.range_push("loss calc")
+            end = timeit.default_timer()
+
             loss = outputs[0]
 
             if args.n_gpu > 1:
@@ -243,7 +253,7 @@ def train(args, train_dataset, model, tokenizer):
                 scheduler.step()  # Update learning rate schedule
                 model.zero_grad()
                 torch.cuda.nvtx.range_pop()
-                
+
                 global_step += 1
 
                 # Log metrics
@@ -274,7 +284,9 @@ def train(args, train_dataset, model, tokenizer):
                     torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
                     logger.info("Saving optimizer and scheduler states to %s", output_dir)
 
+            Backward_times.append(timeit.default_timer() - end)
             torch.cuda.nvtx.range_pop()
+            Step_times.append(timeit.default_timer() - start_time)
             torch.cuda.nvtx.range_pop()
             if args.max_steps > 0 and global_step > args.max_steps:
                 epoch_iterator.close()
@@ -283,6 +295,10 @@ def train(args, train_dataset, model, tokenizer):
             train_iterator.close()
             break
 
+    print("Mean step time:", np.mean(Step_times[20:]))
+    print("Mean Forward time:", np.mean(Forward_times[20:]))
+    print("Mean Backward time:", np.mean(Backward_times[20:]))
+    
     if args.local_rank in [-1, 0]:
         tb_writer.close()
 
